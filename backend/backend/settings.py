@@ -154,7 +154,7 @@ EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'aaziz9642@gmail.com'
-EMAIL_HOST_PASSWORD = 'nnjncgtfbymejnmi'  # Use App Password from Google
+EMAIL_HOST_PASSWORD = 'pzywtmhuqfazuvwd'  # Use App Password from Google
 DEFAULT_FROM_EMAIL = 'Healthcare Platform <aaziz9642@gmail.com>'
 
 # ===== SWAGGER/API DOCUMENTATION SETTINGS =====

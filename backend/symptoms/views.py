@@ -1,4 +1,3 @@
-# ==================== symptoms/views.py ====================
 from rest_framework import viewsets, status, permissions, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -9,6 +8,7 @@ from .serializers import (
     SymptomCheckCreateSerializer, SymptomCheckListSerializer,
     HealthTipSerializer, HealthTipListSerializer
 )
+from .ai_service import symptom_analyzer, doctor_recommender
 
 
 class SymptomCategoryViewSet(viewsets.ModelViewSet):
@@ -25,7 +25,7 @@ class SymptomCategoryViewSet(viewsets.ModelViewSet):
 
 class SymptomCheckViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for SymptomCheck operations
+    ViewSet for SymptomCheck operations with AI-powered analysis
     Allows anonymous users to check symptoms
     """
     queryset = SymptomCheck.objects.select_related('patient')
@@ -60,84 +60,100 @@ class SymptomCheckViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         """
         Create symptom check with AI analysis
-        This is where you'd integrate your AI model
+        This endpoint automatically analyzes symptoms using AI
         """
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        symptoms = request.data.get('symptoms_description', '')
         
-        # Here you would call your AI service to analyze symptoms
-        # For now, we'll just save the data as provided
+        if not symptoms or len(symptoms.strip()) < 10:
+            return Response(
+                {'error': 'Please provide a detailed description of your symptoms (at least 10 characters)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # AI Analysis
+        try:
+            analysis_result = symptom_analyzer.analyze_symptoms(symptoms)
+            
+            # Get recommended specialties
+            specialties = doctor_recommender.get_recommended_specialties(
+                symptoms, 
+                analysis_result['urgency_level']
+            )
+            analysis_result['recommended_specialties'] = specialties
+            
+        except Exception as e:
+            return Response(
+                {'error': f'AI analysis failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Create symptom check record
+        serializer = self.get_serializer(
+            data=analysis_result,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
         symptom_check = serializer.save()
         
-        # Return full details
+        # Return full details including AI recommendations
         output_serializer = SymptomCheckSerializer(symptom_check)
+        response_data = output_serializer.data
+        response_data['recommended_specialties'] = specialties
+        
         return Response(
-            output_serializer.data,
+            response_data,
             status=status.HTTP_201_CREATED
         )
     
     @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
     def analyze(self, request):
         """
-        Analyze symptoms and provide recommendations
-        This is the main AI endpoint
-        """
-        symptoms = request.data.get('symptoms_description', '')
+        Quick symptom analysis endpoint without saving to database
+        Use this for instant feedback before user decides to save
         
-        if not symptoms:
+        POST /api/symptoms/checks/analyze/
+        Body: { "symptoms": "your symptoms description" }
+        """
+        symptoms = request.data.get('symptoms', '') or request.data.get('symptoms_description', '')
+        
+        if not symptoms or len(symptoms.strip()) < 10:
             return Response(
-                {'error': 'Symptoms description is required'},
+                {'error': 'Please provide a detailed description of your symptoms (at least 10 characters)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # TODO: Integrate with AI model here
-        # For now, return a mock analysis
-        
-        # Mock AI analysis
-        analysis = self._mock_ai_analysis(symptoms)
-        
-        # Create symptom check record
-        serializer = SymptomCheckCreateSerializer(
-            data=analysis,
-            context={'request': request}
-        )
-        
-        if serializer.is_valid():
-            symptom_check = serializer.save()
-            output_serializer = SymptomCheckSerializer(symptom_check)
-            return Response(output_serializer.data)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
-    def _mock_ai_analysis(self, symptoms):
-        """
-        Mock AI analysis - replace with actual AI service
-        """
-        symptoms_lower = symptoms.lower()
-        
-        # Simple keyword-based urgency detection (replace with real AI)
-        if any(word in symptoms_lower for word in ['severe', 'chest pain', 'bleeding', 'unconscious']):
-            urgency = 'emergency'
-            recommendation = 'Seek immediate emergency care. Call 911 or go to the nearest emergency room.'
-            provider_type = 'Emergency Room'
-        elif any(word in symptoms_lower for word in ['fever', 'pain', 'injury', 'infection']):
-            urgency = 'doctor_visit'
-            recommendation = 'Schedule an appointment with your doctor within 24-48 hours.'
-            provider_type = 'Primary Care Physician'
-        else:
-            urgency = 'home_care'
-            recommendation = 'Monitor symptoms. Rest and stay hydrated. Seek care if symptoms worsen.'
-            provider_type = 'Self-care'
-        
-        return {
-            'symptoms_description': symptoms,
-            'urgency_level': urgency,
-            'recommendation': recommendation,
-            'recommended_provider_type': provider_type,
-            'confidence_score': 0.85,
-            'possible_conditions': '["Common Cold", "Flu", "Viral Infection"]',
-            'follow_up_needed': urgency != 'home_care'
-        }
+        try:
+            # Run AI analysis
+            analysis = symptom_analyzer.analyze_symptoms(symptoms)
+            
+            # Get recommended specialties
+            specialties = doctor_recommender.get_recommended_specialties(
+                symptoms,
+                analysis['urgency_level']
+            )
+            
+            # Format response for frontend
+            import json
+            response_data = {
+                'urgency': analysis['urgency_level'],
+                'recommendation': analysis['recommendation'],
+                'provider_type': analysis['recommended_provider_type'],
+                'confidence': float(analysis['confidence_score']),
+                'possible_conditions': json.loads(analysis.get('possible_conditions', '[]')),
+                'recommended_specialties': specialties,
+                'follow_up_needed': analysis['follow_up_needed']
+            }
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            import traceback
+            print(f"Analysis error: {str(e)}")
+            print(traceback.format_exc())
+            return Response(
+                {'error': f'Analysis failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=True, methods=['post'])
     def book_appointment(self, request, pk=None):
@@ -170,6 +186,19 @@ class SymptomCheckViewSet(viewsets.ModelViewSet):
         }
         
         return Response(stats)
+    
+    @action(detail=False, methods=['get'])
+    def my_history(self, request):
+        """Get current user's symptom check history"""
+        if not request.user.is_authenticated:
+            return Response(
+                {'error': 'Authentication required'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        checks = SymptomCheck.objects.filter(patient=request.user).order_by('-created_at')[:10]
+        serializer = SymptomCheckListSerializer(checks, many=True)
+        return Response(serializer.data)
 
 
 class HealthTipViewSet(viewsets.ModelViewSet):
@@ -227,8 +256,15 @@ class HealthTipViewSet(viewsets.ModelViewSet):
         
         # Use date as seed for consistent daily tip
         today = date.today()
-        tip_index = today.toordinal() % self.get_queryset().count()
+        tip_count = self.get_queryset().count()
         
+        if tip_count == 0:
+            return Response(
+                {'message': 'No health tips available'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        tip_index = today.toordinal() % tip_count
         tip = self.get_queryset()[tip_index:tip_index + 1].first()
         
         if tip:
